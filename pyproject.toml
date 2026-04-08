@@ -36,10 +36,9 @@ dev = [
 
 [project.scripts]
 # Server entry point - enables running via: uv run --project . server
-# or: python -m finops_env.server.app
-server = "finops_env.server.app:main"
+server = "server.app:main"
 
 [tool.setuptools]
 include-package-data = true
-packages = ["finops_env", "finops_env.server"]
-package-dir = { "finops_env" = ".", "finops_env.server" = "server" }
+packages = ["server", "tasks"]
+package-dir = { "" = "." }

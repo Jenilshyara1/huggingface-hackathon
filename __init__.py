@@ -6,8 +6,8 @@
 
 """Finops Env Environment."""
 
-from .client import FinopsEnv
-from .models import FinopsAction, FinopsObservation
+from client import FinopsEnv
+from models import FinopsAction, FinopsObservation
 
 __all__ = [
     "FinopsAction",

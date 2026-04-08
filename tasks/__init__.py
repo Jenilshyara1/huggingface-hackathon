@@ -17,8 +17,8 @@ try:
     from .database import make_task1_db, make_task2_db, make_task3_db
     from .graders import grade_task1, grade_task2, grade_task3
 except (ModuleNotFoundError, ImportError):
-    from database import make_task1_db, make_task2_db, make_task3_db
-    from graders import grade_task1, grade_task2, grade_task3
+    from tasks.database import make_task1_db, make_task2_db, make_task3_db
+    from tasks.graders import grade_task1, grade_task2, grade_task3
 
 
 @dataclass

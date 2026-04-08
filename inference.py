@@ -27,8 +27,8 @@ import sys
 import time
 from typing import Any
 
-# Make the finops_env package importable when running from project root.
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "finops_env"))
+# Make modules importable when running from project root.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from openai import OpenAI  # noqa: E402
 
@@ -41,8 +41,8 @@ from tasks import TASK_ORDER, TASKS  # noqa: E402
 # config
 # ----------------------------------------------------------------------------
 
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o-mini")
+API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
+MODEL_NAME = os.environ.get("MODEL_NAME", "llama-3.3-70b-versatile")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 # Optional — only used if you switch to from_docker_image()
 LOCAL_IMAGE_NAME = os.environ.get("LOCAL_IMAGE_NAME")
