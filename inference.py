@@ -11,9 +11,10 @@ Runs an LLM agent (via an OpenAI-compatible API) against all 3 tasks and
 prints the structured [START]/[STEP]/[END] logs required by the hackathon.
 
 Environment variables (REQUIRED by the hackathon spec):
-    API_BASE_URL   — LLM API endpoint (e.g. https://api.openai.com/v1)
-    MODEL_NAME     — Model identifier (e.g. gpt-4o-mini)
-    HF_TOKEN       — API key (HuggingFace / OpenAI / etc.)
+    API_BASE_URL     — LLM API endpoint
+    MODEL_NAME       — Model identifier
+    HF_TOKEN         — Your Hugging Face / API key
+    LOCAL_IMAGE_NAME — Docker image name (if using from_docker_image())
 
 Usage:
     API_BASE_URL=... MODEL_NAME=... HF_TOKEN=... python inference.py
@@ -41,14 +42,42 @@ from tasks import TASK_ORDER, TASKS  # noqa: E402
 # config
 # ----------------------------------------------------------------------------
 
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.groq.com/openai/v1")
-MODEL_NAME = os.environ.get("MODEL_NAME", "llama-3.3-70b-versatile")
+API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 HF_TOKEN = os.environ.get("HF_TOKEN")
 # Optional — only used if you switch to from_docker_image()
 LOCAL_IMAGE_NAME = os.environ.get("LOCAL_IMAGE_NAME")
 
-MAX_RETRIES_PER_STEP = 2           # LLM parse-failure retries before we count it as an invalid action
-REQUEST_TIMEOUT_SECONDS = 60       # per-request timeout for safety
+BENCHMARK = "finops_env"
+SUCCESS_SCORE_THRESHOLD = 0.5       # score >= this → success=true in [END]
+MAX_RETRIES_PER_STEP = 2            # LLM parse-failure retries before treating as invalid action
+REQUEST_TIMEOUT_SECONDS = 60        # per-request timeout
+
+
+# ----------------------------------------------------------------------------
+# structured logging (matches the hackathon-required stdout format exactly)
+# ----------------------------------------------------------------------------
+
+def log_start(task: str, model: str) -> None:
+    print(f"[START] task={task} env={BENCHMARK} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: str | None) -> None:
+    error_val = error if error else "null"
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} "
+        f"done={str(done).lower()} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -69,8 +98,19 @@ CRITICAL RULES:
 Strategy: read the ticket → plan the minimum sequence of calls using ONLY the listed tools → execute → when the underlying task is achieved, call submit."""
 
 
-def build_user_prompt(obs) -> str:
-    """Render the current observation into a compact user message."""
+def build_user_prompt(obs, include_tools: bool = True) -> str:
+    """Render the current observation into a compact user message.
+
+    `include_tools` is True only on the first step — subsequent steps omit the
+    static tool catalog to keep the transcript small and avoid TPM limits.
+    """
+    step_line = f"STEP {obs.steps_taken}/{obs.max_steps}"
+    response_line = f"LAST TOOL RESPONSE:\n{json.dumps(obs.last_response)}"
+    suffix = "Output the next action as a single JSON object: {\"tool\": \"<tool_name>\", \"args\": {...}}"
+
+    if not include_tools:
+        return f"{step_line}\n{response_line}\n\n{suffix}"
+
     tools_block = "\n".join(
         f"- {t['name']}({', '.join(f'{k}: {v}' for k, v in t['args'].items())}) — {t['description']}"
         for t in obs.available_tools
@@ -78,19 +118,12 @@ def build_user_prompt(obs) -> str:
     return (
         f"TICKET:\n{obs.ticket}\n\n"
         f"AVAILABLE TOOLS:\n{tools_block}\n\n"
-        f"STEP {obs.steps_taken}/{obs.max_steps}\n"
-        f"LAST TOOL RESPONSE:\n{json.dumps(obs.last_response, indent=2)}\n\n"
-        f"Output the next action as a single JSON object: "
-        f'{{"tool": "<tool_name>", "args": {{...}}}}'
+        f"{step_line}\n{response_line}\n\n{suffix}"
     )
 
 
 def parse_action(text: str) -> FinopsAction | None:
-    """Extract a FinopsAction from the LLM's response text.
-
-    Handles the common failure modes: surrounding whitespace, markdown fences,
-    leading prose before the JSON object.
-    """
+    """Extract a FinopsAction from the LLM's response text."""
     if not text:
         return None
     text = text.strip()
@@ -102,11 +135,9 @@ def parse_action(text: str) -> FinopsAction | None:
             text = text[4:]
         text = text.strip()
 
-    # find the first '{' and parse from there
     start = text.find("{")
     if start == -1:
         return None
-    # try progressively shorter suffixes until one parses (handles trailing prose)
     for end in range(len(text), start, -1):
         try:
             obj = json.loads(text[start:end])
@@ -122,91 +153,93 @@ def parse_action(text: str) -> FinopsAction | None:
 # ----------------------------------------------------------------------------
 
 def run_task(env: FinopsEnvironment, client: OpenAI, task_id: str) -> dict[str, Any]:
-    """Run one task to completion. Returns {task_id, score, steps, elapsed_sec}."""
-    start_wall = time.time()
-    print(f"[START] task={task_id} model={MODEL_NAME}", flush=True)
+    """Run one task to completion. Returns result dict."""
+    log_start(task=task_id, model=MODEL_NAME)
 
     obs = env.reset(task_id=task_id)
     transcript: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
     total_steps = 0
-    total_reward = 0.0
+    step_rewards: list[float] = []
     final_score = 0.0
+    last_error: str | None = None
 
-    while not obs.done and obs.steps_taken < obs.max_steps:
-        user_msg = build_user_prompt(obs)
-        transcript.append({"role": "user", "content": user_msg})
+    try:
+        while not obs.done and obs.steps_taken < obs.max_steps:
+            user_msg = build_user_prompt(obs, include_tools=(total_steps == 0))
+            transcript.append({"role": "user", "content": user_msg})
 
-        # call the LLM, retry on parse failures
-        action: FinopsAction | None = None
-        llm_text = ""
-        for attempt in range(MAX_RETRIES_PER_STEP):
-            try:
-                resp = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=transcript,
-                    temperature=0.0,
-                    max_tokens=256,
-                    timeout=REQUEST_TIMEOUT_SECONDS,
-                )
-                llm_text = (resp.choices[0].message.content or "").strip()
-            except Exception as e:
-                llm_text = ""
-                print(f"[STEP] task={task_id} step={total_steps + 1} error=llm_call_failed: {e}", flush=True)
+            # call the LLM, retry on parse failures
+            action: FinopsAction | None = None
+            llm_text = ""
+            last_error = None
 
-            action = parse_action(llm_text)
-            if action is not None:
-                break
-            # nudge the model on retry
-            transcript.append({"role": "assistant", "content": llm_text})
-            transcript.append(
-                {
+            for attempt in range(MAX_RETRIES_PER_STEP):
+                try:
+                    resp = client.chat.completions.create(
+                        model=MODEL_NAME,
+                        messages=transcript,
+                        temperature=0.0,
+                        max_tokens=256,
+                        timeout=REQUEST_TIMEOUT_SECONDS,
+                    )
+                    llm_text = (resp.choices[0].message.content or "").strip()
+                    last_error = None
+                except Exception as e:
+                    llm_text = ""
+                    last_error = f"llm_call_failed:{e}"
+
+                action = parse_action(llm_text)
+                if action is not None:
+                    break
+                if last_error is None:
+                    last_error = "parse_failed"
+                transcript.append({"role": "assistant", "content": llm_text})
+                transcript.append({
                     "role": "user",
                     "content": 'Your previous response was not valid JSON. Output ONLY a single JSON object like {"tool": "search_customers", "args": {"name": "TechCorp"}}.',
-                }
-            )
+                })
 
-        if action is None:
-            # give up on this step — treat as invalid action
-            action = FinopsAction(tool="__invalid__", args={})
-            print(f"[STEP] task={task_id} step={total_steps + 1} tool=__parse_failed__", flush=True)
-        else:
+            if action is None:
+                action = FinopsAction(tool="__invalid__", args={})
+
             transcript.append({"role": "assistant", "content": llm_text})
 
-        # execute the action in the env
-        obs = env.step(action)
-        total_steps += 1
-        total_reward += float(obs.reward or 0.0)
-        print(
-            f"[STEP] task={task_id} step={total_steps} tool={action.tool} "
-            f"reward={obs.reward:+.3f} done={obs.done}",
-            flush=True,
-        )
+            # execute in env
+            obs = env.step(action)
+            total_steps += 1
+            reward = float(obs.reward or 0.0)
+            step_rewards.append(reward)
 
-        # attach the tool result to the transcript so the LLM sees it next turn
-        transcript.append(
-            {
+            # extract error from tool response if any
+            step_error = last_error
+            if step_error is None and not obs.last_response.get("ok", True):
+                step_error = obs.last_response.get("error")
+
+            log_step(
+                step=total_steps,
+                action=action.tool,
+                reward=reward,
+                done=obs.done,
+                error=step_error,
+            )
+
+            transcript.append({
                 "role": "user",
                 "content": f"TOOL RESULT: {json.dumps(obs.last_response)}",
-            }
-        )
+            })
 
-        if obs.done:
-            # final grader result is exposed in last_response when the episode ends
-            final_score = float(obs.last_response.get("final_score") or 0.0)
-            break
+            if obs.done:
+                final_score = float(obs.last_response.get("final_score") or 0.0)
+                break
 
-    elapsed = time.time() - start_wall
-    print(
-        f"[END] task={task_id} score={final_score:.3f} "
-        f"cumulative_reward={total_reward:+.3f} steps={total_steps} elapsed_sec={elapsed:.1f}",
-        flush=True,
-    )
+    finally:
+        success = final_score >= SUCCESS_SCORE_THRESHOLD
+        log_end(success=success, steps=total_steps, score=final_score, rewards=step_rewards)
+
     return {
         "task_id": task_id,
         "score": final_score,
-        "cumulative_reward": total_reward,
         "steps": total_steps,
-        "elapsed_sec": elapsed,
     }
 
 
@@ -235,12 +268,11 @@ def main() -> int:
     for r in all_results:
         cfg = TASKS[r["task_id"]]
         print(
-            f"  {r['task_id']} ({cfg.difficulty}): score={r['score']:.3f}  "
-            f"steps={r['steps']}  elapsed={r['elapsed_sec']:.1f}s",
+            f"  {r['task_id']} ({cfg.difficulty}): score={r['score']:.2f}  steps={r['steps']}",
             flush=True,
         )
     mean = sum(r["score"] for r in all_results) / len(all_results)
-    print(f"Mean score: {mean:.3f}", flush=True)
+    print(f"Mean score: {mean:.2f}", flush=True)
     return 0
 
 

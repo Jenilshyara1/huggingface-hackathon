@@ -39,9 +39,12 @@ TASKS: dict[str, TaskConfig] = {
             "Customer 'TechCorp Inc' emailed saying they were double-charged "
             "for their March invoice. Please find the duplicate charge and "
             "refund exactly one of the two identical March invoices. Do not "
-            "touch any other customer's invoices. Call `submit` when done."
+            "touch any other customer's invoices — note that a few other "
+            "customers also have March charges, and some even have their own "
+            "unrelated duplicates; you must refund ONLY TechCorp's duplicate. "
+            "Call `submit` when done."
         ),
-        max_steps=8,
+        max_steps=10,
         seed_fn=make_task1_db,
         grader_fn=grade_task1,
     ),
@@ -49,12 +52,16 @@ TASKS: dict[str, TaskConfig] = {
         task_id="task2",
         difficulty="medium",
         ticket=(
-            "Apply a 10% loyalty discount to every active customer whose "
-            "lifetime spend (sum of all their invoices) exceeds $500. "
-            "Use `list_customers`, then inspect each customer's invoices. "
-            "Do NOT discount customers below the threshold. Call `submit` when done."
+            "Apply a 10% loyalty discount to every ACTIVE customer whose "
+            "lifetime spend (sum of all their invoices) EXCEEDS $500 "
+            "(strictly greater than — a customer with exactly $500 does NOT "
+            "qualify). Start with `list_customers(status=\"active\")`, then "
+            "inspect each active customer's invoices. Do NOT discount "
+            "customers below or at the threshold, and do NOT discount "
+            "inactive customers even if their spend is high. "
+            "Call `submit` when done."
         ),
-        max_steps=25,
+        max_steps=20,
         seed_fn=make_task2_db,
         grader_fn=grade_task2,
     ),
@@ -63,13 +70,14 @@ TASKS: dict[str, TaskConfig] = {
         difficulty="hard",
         ticket=(
             "Cross-reference our CRM with our Billing system. For any user "
-            "whose CRM status is 'cancelled' but who still has an 'active' "
-            "billing subscription, cancel the billing subscription. Do NOT "
-            "cancel subscriptions that are already cancelled (that wastes "
-            "a step and counts as a wrong destructive action). "
-            "Call `submit` when done."
+            "whose CRM status is 'cancelled' but whose billing subscription "
+            "is still 'active', cancel the billing subscription. Do NOT "
+            "cancel subscriptions that are already cancelled (that counts "
+            "as a wrong destructive action). Some cancelled CRM users may "
+            "have no matching billing subscription at all — that's a "
+            "dead-end, not a target; just move on. Call `submit` when done."
         ),
-        max_steps=25,
+        max_steps=20,
         seed_fn=make_task3_db,
         grader_fn=grade_task3,
     ),
